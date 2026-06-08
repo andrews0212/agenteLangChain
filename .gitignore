@@ -1,0 +1,4 @@
+.env
+agente_ia/
+__pycache__/
+*.pyc
