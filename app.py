@@ -1,8 +1,10 @@
 import os
 from dotenv import load_dotenv
-from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.graph import StateGraph, MessagesState, END
+from langgraph.prebuilt import ToolNode
 from ddgs import DDGS
 
 load_dotenv()
@@ -22,19 +24,41 @@ def search(query: str) -> str:
     return "\n".join(r["body"] for r in results)
 
 
-agent = create_agent(
-    model=llm,
-    tools=[search],
-    system_prompt="Eres un asistente útil. Haz UNA sola búsqueda y responde con eso. No hagas más de una búsqueda.",
-)
+tools = [search]
+llm_with_tools = llm.bind_tools(tools)
 
-inputs = {"messages": [{"role": "user", "content": "Dame las 3 noticias más importantes de tecnología hoy"}]}
-for chunk in agent.stream(inputs, stream_mode="updates", config={"recursion_limit": 5}):
+SYSTEM_PROMPT = "Eres un asistente útil. Haz UNA sola búsqueda y responde con eso. No hagas más de una búsqueda."
+
+
+def agent_node(state: MessagesState):
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+def should_continue(state: MessagesState):
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "tools"
+    return END
+
+
+graph = StateGraph(MessagesState)
+graph.add_node("agent", agent_node)
+graph.add_node("tools", ToolNode(tools))
+graph.set_entry_point("agent")
+graph.add_conditional_edges("agent", should_continue)
+graph.add_edge("tools", "agent")
+
+app = graph.compile()
+
+inputs = {"messages": [HumanMessage(content="Dame las 3 noticias más importantes de tecnología hoy")]}
+for chunk in app.stream(inputs, stream_mode="updates", config={"recursion_limit": 5}):
     if "tools" in chunk:
         for msg in chunk["tools"]["messages"]:
             print(f"[Buscando...] {msg.name}")
-    if "model" in chunk:
-        for msg in chunk["model"]["messages"]:
+    if "agent" in chunk:
+        for msg in chunk["agent"]["messages"]:
             if not hasattr(msg, "content"):
                 continue
             content = msg.content
